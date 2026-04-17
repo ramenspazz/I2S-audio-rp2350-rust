@@ -1,3 +1,4 @@
+I couldnt figure out how to do the license thingee, so I just put this here... rp-hal is not my work, I just shamelessly use it!
 <!-- PROJECT LOGO -->
 <br />
 <p align="center">
@@ -38,7 +39,6 @@
 </details>
 
 <!-- INTRODUCTION -->
-I couldnt figure out how to do the license thingee, so I just put this here...
 ## Introduction
 
 This is the `rp235x-hal` package - a library crate of high-level Rust drivers
