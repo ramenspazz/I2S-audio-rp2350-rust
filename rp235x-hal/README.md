@@ -38,6 +38,7 @@
 </details>
 
 <!-- INTRODUCTION -->
+I couldnt figure out how to do the license thingee, so I just put this here...
 ## Introduction
 
 This is the `rp235x-hal` package - a library crate of high-level Rust drivers
