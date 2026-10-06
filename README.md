@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # RP2350 USB audio playback prototype
 
 Default firmware: UAC 1.0, stereo 48 kHz S32_LE USB playback through Pico Audio Pack.
@@ -14,3 +15,7 @@ uses rp-hal to create a pio based i2s audio output device. Double surprise, I ha
 
 # Looking for help!
 I am not sure if my [pico audio pack](https://shop.pimoroni.com/products/pico-audio-pack?variant=32369490853971) is not working, or if my code is not working! Any help is appreciated!
+=======
+# working sample achieved!
+uses rp-hal to create a pio based i2s audio output device. Audio output now works and currently, code outputs a 300hz sine wave.
+>>>>>>> cd778ce03dfb577d8afb748d07edd9d98ac58106
