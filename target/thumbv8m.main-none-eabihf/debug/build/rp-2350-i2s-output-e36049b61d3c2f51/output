@@ -1,2 +1,0 @@
-cargo:rustc-link-search=/home/ramenspazz/Programs/I2S-audio-rp2350-rust/target/thumbv8m.main-none-eabihf/debug/build/rp-2350-i2s-output-e36049b61d3c2f51/out
-cargo:rerun-if-changed=memory.x

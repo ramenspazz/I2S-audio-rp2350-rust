@@ -1,3 +1,0 @@
-cargo:rustc-link-search=/home/ramenspazz/Programs/I2S-audio-rp2350-rust/target/thumbv8m.main-none-eabihf/debug/build/defmt-a35f2fa02f99a5bb/out
-cargo:rustc-check-cfg=cfg(c_variadic)
-cargo:rustc-check-cfg=cfg(no_cas)
