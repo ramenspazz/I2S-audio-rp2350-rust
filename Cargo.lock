@@ -84,6 +84,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
 
 [[package]]
+name = "bitfield"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f798d2d157e547aa99aab0967df39edd0b70307312b6f8bd2848e6abe40896e0"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -662,6 +668,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "i2c-character-display"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6170902cbfd6e5855a1fa8a75dc68991bb98220c24135a5cf23ce74d32ddcccf"
+dependencies = [
+ "bitfield 0.17.0",
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1120,6 +1136,7 @@ dependencies = [
  "futures",
  "hd44780-driver",
  "heapless 0.8.0",
+ "i2c-character-display",
  "libm",
  "nb 1.1.0",
  "panic-halt",
@@ -1133,10 +1150,14 @@ dependencies = [
 [[package]]
 name = "rp-binary-info"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f582261945fa215d40e2988b4df595d11c0908c0fff97a0fe23df766d117b790"
 
 [[package]]
 name = "rp-hal-common"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8288358786b1458fb2caac8c4b40fb529ef4200d6c46467e2695b7a8ba573ae8"
 dependencies = [
  "fugit",
 ]
@@ -1144,6 +1165,8 @@ dependencies = [
 [[package]]
 name = "rp235x-hal"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871a18f1bdad479deb080891d65b4d61d000f06f8e4227071f8ca5aa39c25d3a"
 dependencies = [
  "bitfield 0.14.0",
  "cortex-m",
@@ -1162,7 +1185,7 @@ dependencies = [
  "itertools 0.13.0",
  "nb 1.1.0",
  "paste",
- "pio-core",
+ "pio",
  "rand_core",
  "riscv",
  "riscv-rt",
@@ -1179,6 +1202,8 @@ dependencies = [
 [[package]]
 name = "rp235x-hal-macros"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74edd7a5979e9763bbb98e9746e711bac7464ee3397af7288e6c288ff0d3c764"
 dependencies = [
  "proc-macro2",
  "quote",

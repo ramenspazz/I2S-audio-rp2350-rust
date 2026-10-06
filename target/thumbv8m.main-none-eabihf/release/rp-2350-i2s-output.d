@@ -1,0 +1,1 @@
+/home/ramenspazz/Programs/I2S-audio-rp2350-rust/target/thumbv8m.main-none-eabihf/release/rp-2350-i2s-output: /home/ramenspazz/Programs/I2S-audio-rp2350-rust/build.rs /home/ramenspazz/Programs/I2S-audio-rp2350-rust/memory.x /home/ramenspazz/Programs/I2S-audio-rp2350-rust/src/i2s_lib.rs /home/ramenspazz/Programs/I2S-audio-rp2350-rust/src/main.rs

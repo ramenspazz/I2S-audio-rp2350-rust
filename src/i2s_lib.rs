@@ -1,63 +1,37 @@
 //! I2S Library
 
-// always good to have pi and e, cuz why not
-pub const PI: f32 = 3.141592653589793238;
-pub const E_MATH: f32 = 2.71828182845904523536;
-
-// clock constants
+/// Stereo frames per second, with two 32-bit slots and two PIO cycles/bit.
 pub const SAMPLE_RATE: u32 = 48_000;
-// The bit clock pulses once for each discrete bit of data on the data lines. The bit clock
-// frequency is the product of the sample rate, the number of bits per channel and the number
-// of channels. So, for example, CD Audio with a sample frequency of 44.1 kHz, with 16 bits of
-// precision and two channels (stereo) has a bit clock frequency of:
-//     44.1 kHz × 16 × 2 = 1.4112 MHz
-// With out 48 kHz sample rate and 32 bits per channel, the bit clock frequency is:
-pub const BIT_CLOCK_HZ: u32 = SAMPLE_RATE * 32 * 2; // 6.144 MHz
-pub const CLOCK_MULTIPLIER: u32 = 64;
-pub const SYS_CLOCK_HZ: u32 = 193_500_000; // 193.5 MHz.
-// The USB clock needs to be 48 MHz. This is sufficent to transmit 48 kHz stereo audio at 32 bits per channel.
-pub const USB_CLOCK_HZ: u32 = 48_000_000u32; // 48 MHz
+pub const BIT_CLOCK_HZ: u32 = SAMPLE_RATE * 32 * 2; // 3.072 MHz
+pub const PIO_CLOCK_HZ: u32 = BIT_CLOCK_HZ * 2; // 6.144 MHz
 
-// other constants
-const SIZE_U16: usize = 65536;
-const AMPLITUDE: i32 = 0x6FFFFF;
-const FREQUENCY: f32 = 300.0;
-pub const TABLE_SIZE: usize = 254;
+// 300 Hz diagnostic tone: 160 frames per period, six periods per buffer.
+pub const FRAMES_PER_PERIOD: usize = 160;
+pub const TABLE_SIZE: usize = FRAMES_PER_PERIOD * 6 * 2;
 
-// The minimum and maximum PWM value (i.e. LED brightness) we want
-pub const LOW: u16 = 0x0000;
-pub const HIGH: u16 = 0xFFF0;
-
-/// # Purpose
-/// Generates an array of u32 samples that represent an i32 value at the byte level
-pub fn generate_sine_wave_single_sample_angular(theta_u16: u16) -> u32 {
-    let angle = theta_u16 as f32 * 2.0 * PI * FREQUENCY / SIZE_U16 as f32;
-    pack_i2s_sample(
-        AMPLITUDE as f32 * {
-            // using a taylor series to calculate the sine wave value for the given angle
-            let mut out_temp = 0.;
-            let mut angle_temp = 0.;
-            out_temp += angle;
-            angle_temp = angle_temp * angle * angle;
-            out_temp += angle_temp / 6.;
-            out_temp += angle_temp * angle * angle / 120.;
-            out_temp
-        }
-    )
-}
-
-pub fn pack_i2s_sample(sample: f32) -> u32 {
-    let clamped = sample.max(-1.0).min(1.0);
-    (clamped * 2147483647.0) as u32  // Convert to i32, reinterpret as u32
-}
-
-use pio::pio_asm;  // For PIO assembly macro
-use rp235x_hal::{
-    gpio::{FunctionNull, Pin, PinId, PullDown, ValidFunction}, pio::{
-        InstallError, PIO, PIOExt, Rx, StateMachine, StateMachineIndex, Stopped, Tx, UninitStateMachine, ValidStateMachine
+/// Identical buffers of whole periods can be replayed without discontinuities.
+/// Compute once at startup, so sample generation cannot starve DMA.
+pub fn fill_test_tone(buf: &mut [u32; TABLE_SIZE]) {
+    for (frame, stereo) in buf.chunks_exact_mut(2).enumerate() {
+        let angle = (frame % FRAMES_PER_PERIOD) as f32 * 2.0 * core::f32::consts::PI
+            / FRAMES_PER_PERIOD as f32;
+        // Signed 24-bit PCM at 5% amplitude, left-aligned in a 32-bit slot.
+        let sample = (libm::sinf(angle) * (0x7fffff as f32 * 0.05)) as i32;
+        let word = (sample as u32) << 8;
+        stereo[0] = word;
+        stereo[1] = word;
     }
-};
+}
+
 use fugit::{self, HertzU32};
+use pio::pio_asm; // For PIO assembly macro
+use rp235x_hal::{
+    gpio::{FunctionNull, Pin, PinId, PullDown, ValidFunction},
+    pio::{
+        InstallError, PIOExt, Rx, StateMachine, StateMachineIndex, Stopped, Tx, UninitStateMachine,
+        ValidStateMachine, PIO,
+    },
+};
 
 #[derive(Debug)]
 pub enum I2SError {
@@ -74,11 +48,12 @@ impl PioClockDivider {
         match self {
             Self::Exact { integer, fraction } => (*integer, *fraction),
             Self::FromSystemClock(system_clock_hz) => {
-                let hertz = system_clock_hz.to_Hz();
-                let (fraction, integer) = libm::modf(hertz as f64 / SYS_CLOCK_HZ as f64);
-
-                (integer as u16, (fraction * 256.0) as u8)
-            },
+                // Round to the nearest representable 16.8 divider.
+                let fixed = ((system_clock_hz.to_Hz() as u64 * 256 + PIO_CLOCK_HZ as u64 / 2)
+                    / PIO_CLOCK_HZ as u64) as u32;
+                assert!((256..=0x00ff_ffff).contains(&fixed));
+                ((fixed >> 8) as u16, (fixed & 255) as u8)
+            }
         }
     }
 }
@@ -132,30 +107,26 @@ impl<P: PIOExt, SM: StateMachineIndex> I2SOutput<P, SM> {
 
         #[rustfmt::skip]
         let dac_pio_program = pio_asm!(
-            ".side_set 2",
+            ".side_set 2", // bit 0 BCLK, bit 1 LRCLK
+            // One-time setup. LRCLK changes one bit before each next MSB.
+            "set x, 30 side 0b01",
             ".wrap_target",
-
-            // Left channel
-            "    pull noblock     side 0b00",
-            "    set x, 31        side 0b01",   // BCLK high, LR low
             "left_loop:",
-            "    out pins, 1      side 0b01",   // data bit + BCLK high
-            "    nop              side 0b00",   // BCLK low (data held)
-            "    jmp x-- left_loop side 0b01",
-
-            // Right channel
-            "    pull noblock     side 0b10",
-            "    set x, 31        side 0b11",   // BCLK high, LR high
+            "out pins, 1 side 0b00",
+            "jmp x-- left_loop side 0b01",
+            "out pins, 1 side 0b10", // left LSB; announce right channel
+            "set x, 30 side 0b11",
             "right_loop:",
-            "    out pins, 1      side 0b11",
-            "    nop              side 0b10",
-            "    jmp x-- right_loop side 0b11",
-
+            "out pins, 1 side 0b10",
+            "jmp x-- right_loop side 0b11",
+            "out pins, 1 side 0b00", // right LSB; announce left channel
+            "set x, 30 side 0b01",
             ".wrap",
         );
 
-        let installed =
-            pio.install(&dac_pio_program.program).map_err(I2SError::PioInstallationError)?;
+        let installed = pio
+            .install(&dac_pio_program.program)
+            .map_err(I2SError::PioInstallationError)?;
 
         let (divider_int, divider_fraction) = clock_divider.pio_divider();
 
@@ -176,7 +147,11 @@ impl<P: PIOExt, SM: StateMachineIndex> I2SOutput<P, SM> {
             (left_right_clock_pin_id, rp235x_hal::pio::PinDir::Output),
         ]);
 
-        Ok(Self { state_machine: dac_sm, fifo_rx, fifo_tx })
+        Ok(Self {
+            state_machine: dac_sm,
+            fifo_rx,
+            fifo_tx,
+        })
     }
 
     #[allow(clippy::type_complexity)]
