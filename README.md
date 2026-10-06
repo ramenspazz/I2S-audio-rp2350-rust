@@ -12,3 +12,7 @@ Make sure that you have added the thumbv8m.main-none-eabihf target with rustup b
 to 144MHz, and in my tests accross multiple rp2350 devices this was stable and did not require voltage increases to sustain.
 If you want to build for the rp2040, this is possible in my testing, but overclocking to 144MHZ was required due to the
 125MHZ core speed not being sufficient to pass enough data at 32bits-48kHz. Overclock at your own risk!
+
+# Running
+The easiest way to run this is to use [picotool](https://github.com/raspberrypi/picotool#building--installing) as a runner, so that uploading the UF2 file to the pico is automated. I build the project using `cargo run --release --locked` after making sure that the target listed in .cargo/config.toml is correct for your device. For the
+rp2350, the correct target is `thumbv8m.main-none-eabihf`.
