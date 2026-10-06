@@ -1,0 +1,1178 @@
+diff --git a/AUDIO_TEST.md b/AUDIO_TEST.md
+index 4bb69dd..5bb9b22 100644
+--- a/AUDIO_TEST.md
++++ b/AUDIO_TEST.md
+@@ -1,5 +1,8 @@
+ # Pico Audio Pack timing test
+ 
++The default firmware now plays USB audio. Use `--features test-tone` for this
++standalone tone test; see `USB_AUDIO.md` for USB playback.
++
+ This change is based on upstream commit 62cfaa6. It replaces the earlier patch
+ against i2s_module.rs. Apply it to the latest unmodified main branch.
+ 
+@@ -9,7 +12,7 @@ Install Rust and the ARM target, then build from the repository directory:
+ 
+ ```sh
+ rustup target add thumbv8m.main-none-eabihf
+-cargo build --release --locked
++cargo build --release --locked --features test-tone
+ python3 tools/check_i2s.py
+ ```
+ 
+@@ -31,7 +34,7 @@ Pico Audio Pack connections are unchanged:
+ | DIN | 9 | Signed stereo PCM, matching channels |
+ | BCLK | 10 | 3.072 MHz average |
+ | LRCLK | 11 | 48 kHz, 64 BCLK periods/frame |
+-| MUTE | 22 | Low during playback |
++| MUTE (active low) | 22 | High during playback |
+ 
+ Both analog channels should produce a continuous 300 Hz sine wave. If you have
+ a scope or logic analyzer, measure BCLK and LRCLK first. The fractional divider
+@@ -58,7 +61,7 @@ are exactly 3000 system cycles with these settings.
+ 
+ ## Validation and limits
+ 
+-`cargo build --release --locked` succeeds for thumbv8m.main-none-eabihf.
++`cargo build --release --locked --features test-tone` succeeds for thumbv8m.main-none-eabihf.
+ The Python PIO model checks serial bits, clock cadence, and channel alignment
+ under continuous FIFO supply. It does not model DMA starvation or analog output.
+ This firmware has not been flashed or measured on physical hardware here.
+diff --git a/Cargo.toml b/Cargo.toml
+index c5b705c..53ab0da 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -5,6 +5,10 @@ edition = "2021"
+ 
+ # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+ 
++[features]
++default = []
++test-tone = []
++
+ [dependencies]
+ cortex-m = "0.7.2"
+ cortex-m-rt = "0.7"
+@@ -28,7 +32,7 @@ nb = "1.0"
+ panic-halt = "0.2.0"
+ pio = "0.3.0"
+ rp235x-hal = {version = "0.4.0", features = ["binary-info", "critical-section-impl", "rt", "defmt"]}
+-usb-device = "0.3.2"
++usb-device = { version = "0.3.2", features = ["control-buffer-256"] }
+ usbd-serial = "0.2.2"
+ static_cell = "2.1.0"
+ libm = "0.2.16"
+diff --git a/README.md b/README.md
+index d3dfc55..a7d0104 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,14 @@
++# RP2350 USB audio playback prototype
++
++Default firmware: UAC 1.0, stereo 48 kHz S32_LE USB playback through Pico Audio Pack.
++See [USB_AUDIO.md](USB_AUDIO.md) for flashing, first playback, architecture, and validation limits.
++Use `cargo run --release --features test-tone` to flash the standalone 300 Hz test.
++
++The new USB path builds and passes host-side tests, but awaits physical enumeration
++and playback testing. USB VID/PID 1209:0001 is for private testing only.
++
++---
++
+ # Tired and lazy
+ uses rp-hal to create a pio based i2s audio output device. Double surprise, I have reused [code](https://github.com/electronjoe/noise-generator-rust-on-pi-pico/tree/main) that [electronjoe](https://github.com/electronjoe/) reused of [mine](https://github.com/ramenspazz/i2s-audio-rust-rp2040) to make this repo!
+ 
+diff --git a/USB_AUDIO.md b/USB_AUDIO.md
+new file mode 100644
+index 0000000..835d931
+--- /dev/null
++++ b/USB_AUDIO.md
+@@ -0,0 +1,170 @@
++# USB audio playback prototype
++
++Based on upstream commit **447e9ad** (the working audio version).
++The default build receives stereo PCM from USB and plays it through Pico Audio
++Pack. The previous 300 Hz tone is retained behind the `test-tone` feature.
++This is a bring-up prototype; physical USB enumeration/playback has not been
++verified here. It is not a USB compliance certification or a tested release.
++
++## What the computer sees
++
++- Product name: **RP2350 USB Audio**.
++- USB Audio Class **1.0**, playback only (no microphone).
++- Full-speed USB, fixed **48,000 Hz**, two channels, signed **32-bit little-endian** PCM.
++- An asynchronous isochronous OUT endpoint, plus an explicit feedback IN endpoint.
++- No hardware USB volume/mute control; use the computer's software mixer.
++
++UAC version, USB bus speed, and PCM word size are separate choices. UAC 1.0
++supports this PCM format; UAC 2.0 is not required just to send 32-bit samples.
++The 32-bit transport does not imply 32 bits of effective analog DAC precision.
++The 48 kHz sample rate is a selected operating point, not the maximum waveform
++frequency and not a claim about the hardware's maximum supported sample rate.
++
++At 48 kHz, each millisecond normally contains 48 stereo frames:
++48 * 2 channels * 4 bytes = **384 bytes**. Endpoint capacity is 392 bytes,
++allowing a 49-frame packet when feedback asks the host to catch up. Smaller
++whole-frame packets are accepted too. USB OUT means computer-to-device; USB IN
++means device-to-computer, so the feedback endpoint is IN.
++
++## Apply and build
++
++Apply `usb-audio-447e9ad.patch` to commit 447e9ad or a compatible working tree.
++The patch replaces the misleading mute comments as well as adding USB playback.
++Local amplitude-only changes in `i2s_lib.rs` may require merging a patch hunk.
++
++```sh
++git apply --check /path/to/usb-audio-447e9ad.patch
++git apply /path/to/usb-audio-447e9ad.patch
++cargo build --release --locked
++```
++
++Hold BOOTSEL while reconnecting USB, release it, and flash with the configured
++picotool runner:
++
++```sh
++cargo run --release --locked
++```
++
++The application then re-enumerates as **RP2350 USB Audio**. It is silent until
++selected as an output device and sent audio. Use a USB data cable.
++There is no automatic BOOTSEL-reset service in this application; use BOOTSEL
++again before flashing subsequent builds.
++
++To return to the known test tone:
++
++```sh
++cargo run --release --locked --features test-tone
++```
++
++That build intentionally does not enumerate as a USB audio device. Reflash
++without the feature to restore USB playback.
++
++## First playback test (Linux)
++
++Start at low listening volume. The included test-file generator writes a 5%
++peak-amplitude, 48 kHz S32_LE WAV: two seconds in the left channel, then two in
++the right, with fades at each boundary.
++
++```sh
++aplay -l
++python3 tools/make_usb_test.py /tmp/pico-audio-test.wav
++aplay -D hw:CARD=N,DEV=0 /tmp/pico-audio-test.wav
++```
++
++Replace **N** with the numeric ALSA card index shown for RP2350 USB Audio.
++`hw:` bypasses the desktop mixer; the generated WAV itself has a low amplitude.
++If ALSA reports the device is busy, stop desktop playback or select it in the
++desktop sound settings and play the WAV through the desktop instead.
++
++For normal desktop use, select RP2350 USB Audio as the output device. A desktop
++audio server can convert source music to the device's fixed 48 kHz format.
++On other operating systems, inspect audio-device settings for the new output;
++compatibility remains to be tested on each host.
++
++If it does not appear, collect:
++
++```sh
++lsusb -d 1209:0001
++lsusb -v -d 1209:0001
++aplay -l
++```
++
++If present but silent, first check the selected output and headphone jack, then
++reflash the tone build to separate the analog/I2S path from USB problems. The
++LCD shows static configuration only, not measured packet reception or DMA health.
++The existing LCD initialization must succeed before USB starts.
++
++## How the firmware works
++
++1. `usb_audio.rs` supplies the descriptors that identify AudioControl and
++   AudioStreaming interfaces, stereo PCM format, 48 kHz rate, and endpoints.
++2. The host selects alternate setting 1 to start streaming (setting 0 is idle).
++3. `main.rs` polls USB continuously and receives packets without blocking.
++4. `audio_buffer.rs` converts little-endian channel words into a stereo ring.
++5. Two 48-frame DMA buffers feed PIO. One plays while software prepares the next.
++6. PIO keeps the existing 48 kHz/3.072 MHz LRCLK/BCLK and signed 32-bit I2S slots.
++
++USB packets arrive in bursts, whereas the DAC requires evenly spaced samples.
++The ring prebuffers four milliseconds; two DMA buffers add about two milliseconds.
++It outputs zeros while idle or rebuffering and resets the queue on stream changes,
++USB reset, and suspend/resume state changes. On stop, up to two milliseconds of
++already queued audio can still play. Error recovery can cause audible gaps.
++
++### Clock feedback
++
++The USB host and Pico have independent clocks. Always sending exactly 48 frames
++per USB millisecond would eventually empty or overfill the queue if those clocks
++differ, even though both sides call the rate 48 kHz.
++
++The feedback endpoint sends a **3-byte 10.14 fixed-point** value in stereo frames
++per USB millisecond. Nominal 48 is `0x0c0000`, transmitted `00 00 0c`.
++A smoothed queue-fill controller asks for slightly more samples when the queue
++is low and slightly fewer when it is high. It targets 192 frames remaining after
++each refill, with correction bounded to +/-0.125 frame/ms. It does not resample
++or alter the DAC clock. This is an occupancy-based controller, not direct SOF
++clock measurement; tuning and real-host feedback behavior need hardware testing.
++
++The main loop must run promptly: USB is polled, and each DMA completion must be
++serviced within roughly one millisecond. Do not insert blocking LCD writes,
++delays, or lengthy synthesis into it. Larger UI/DSP tasks will need a different
++scheduling design (for example, interrupts or a second core).
++
++No TinyUSB C integration is required. This uses `rp235x-hal` for the USB hardware,
++`usb-device` for enumeration/control transfers, and a focused Rust UAC1 class.
++The inspected `usbd-audio` implementation did not offer the required S32 format
++and explicit feedback path, so it is not added as a dependency.
++
++## Validation and limitations
++
++- Both default USB and `test-tone` ARM release builds pass.
++- Host tests exercise the actual `usb-device` control-transfer stack with a mock
++  bus: descriptor lengths/endpoint association, alternate settings, fixed-rate
++  requests, reset, and feedback byte encoding.
++- Ring tests cover stereo order, negative samples, wraparound, 47/49-frame packets,
++  malformed packets, overflow/underflow, and 60-second drift simulations at
++  +/-100 and +/-1000 ppm with 16 ms of host feedback delay.
++- These tests do not replace enumeration, timing, and sustained playback tests on
++  a physical Pico. USB scheduling, electrical behavior, hotplug, suspend power,
++  and host-specific driver behavior are not certified by the mock tests.
++
++Run the host suite on an x86-64 Linux development machine:
++
++```sh
++cargo test --manifest-path tools/usb-tests/Cargo.toml --target x86_64-unknown-linux-gnu --locked
++```
++
++Use your Rust host target on other architectures. The explicit target overrides
++this repository's embedded build default. The ring includes wrapping counters
++for underruns, overruns, and malformed packets; they are not yet exposed on the LCD.
++
++USB identity **1209:0001** is pid.codes' shared private-test ID, not a unique product
++allocation. Do not ship or redistribute devices using it. The prototype serial
++string is fixed; multiple boards need distinct serials in a later revision.
++
++## References
++
++- USB Audio 1.0: https://www.usb.org/sites/default/files/audio10.pdf
++- Audio data formats 1.0: https://www.usb.org/sites/default/files/frmts10.pdf
++- USB stack: https://docs.rs/usb-device/0.3.2/usb_device/
++- TinyUSB UAC1 descriptor reference: https://github.com/hathach/tinyusb/blob/master/src/device/usbd.h
++- Private-test USB ID: https://pid.codes/1209/0001/
+diff --git a/src/audio_buffer.rs b/src/audio_buffer.rs
+new file mode 100644
+index 0000000..f0abc1d
+--- /dev/null
++++ b/src/audio_buffer.rs
+@@ -0,0 +1,172 @@
++//! Single-owner PCM ring and buffer-fill feedback controller. No interrupts/locks.
++pub const BLOCK_FRAMES: usize = 48; // 1 ms at 48 kHz
++pub const BLOCK_WORDS: usize = BLOCK_FRAMES * 2;
++pub const CAPACITY: usize = 1024; // stereo frames, not individual samples
++pub const TARGET: usize = 192; // four milliseconds in the software queue
++const NOMINAL: i32 = 48 << 14;
++
++pub struct AudioBuffer {
++    frames: [[u32; 2]; CAPACITY],
++    read: usize,
++    len: usize,
++    primed: bool,
++    filtered_fill_q8: i32,
++    pub underruns: u32,
++    pub overruns: u32,
++    pub malformed: u32,
++}
++impl AudioBuffer {
++    pub const fn new() -> Self {
++        Self {
++            frames: [[0; 2]; CAPACITY],
++            read: 0,
++            len: 0,
++            primed: false,
++            filtered_fill_q8: (TARGET * 256) as i32,
++            underruns: 0,
++            overruns: 0,
++            malformed: 0,
++        }
++    }
++    pub fn reset(&mut self) {
++        self.read = 0;
++        self.len = 0;
++        self.primed = false;
++        self.filtered_fill_q8 = (TARGET * 256) as i32;
++    }
++    pub fn push_packet(&mut self, packet: &[u8]) {
++        if packet.len() % 8 != 0 {
++            self.malformed = self.malformed.wrapping_add(1);
++            return;
++        }
++        if packet.len() / 8 > CAPACITY - self.len {
++            self.overruns = self.overruns.wrapping_add(1);
++            self.reset(); // recover by rebuffering instead of replaying old audio
++        }
++        if packet.len() / 8 > CAPACITY {
++            return;
++        }
++        for frame in packet.chunks_exact(8) {
++            let index = (self.read + self.len) % CAPACITY;
++            self.frames[index] = [
++                u32::from_le_bytes(frame[..4].try_into().unwrap()),
++                u32::from_le_bytes(frame[4..].try_into().unwrap()),
++            ];
++            self.len += 1;
++        }
++    }
++    /// Called once per completed 1-ms DMA buffer. Output zero until prebuffered.
++    pub fn fill_dma(&mut self, output: &mut [u32; BLOCK_WORDS]) {
++        output.fill(0);
++        if !self.primed {
++            if self.len < TARGET {
++                return;
++            }
++            self.primed = true;
++        }
++        if self.len < BLOCK_FRAMES {
++            self.underruns = self.underruns.wrapping_add(1);
++            self.reset();
++            return;
++        }
++        for stereo in output.chunks_exact_mut(2) {
++            stereo.copy_from_slice(&self.frames[self.read]);
++            self.read = (self.read + 1) % CAPACITY;
++            self.len -= 1;
++        }
++        // Low-pass the after-refill occupancy to suppress USB-packet jitter.
++        self.filtered_fill_q8 += ((self.len * 256) as i32 - self.filtered_fill_q8) / 32;
++    }
++    /// Full-speed UAC1 feedback: stereo frames per USB millisecond, in 10.14.
++    /// Low queue => ask host for more; high queue => ask for fewer. The fixed
++    /// DAC clock never changes. Gain: 1/2048 frame/ms per frame of fill error.
++    pub fn feedback(&self) -> u32 {
++        let error_q8 = (TARGET * 256) as i32 - self.filtered_fill_q8;
++        let correction = (error_q8 / 32).clamp(-2048, 2048); // +/- 0.125 frame/ms
++        (NOMINAL + correction) as u32
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn packet(n: usize, left: i32, right: i32) -> std::vec::Vec<u8> {
++        let frame = [left.to_le_bytes(), right.to_le_bytes()].concat();
++        frame.repeat(n)
++    }
++    #[test]
++    fn signed_stereo_and_prefill() {
++        let mut q = AudioBuffer::new();
++        let mut out = [99; BLOCK_WORDS];
++        q.push_packet(&packet(48, i32::MIN, i32::MAX));
++        q.fill_dma(&mut out);
++        assert_eq!(out, [0; BLOCK_WORDS]);
++        q.push_packet(&packet(144, i32::MIN, i32::MAX));
++        q.fill_dma(&mut out);
++        for pair in out.chunks_exact(2) {
++            assert_eq!(pair, &[0x80000000, 0x7fffffff]);
++        }
++    }
++    #[test]
++    fn ring_wrap_and_variable_packets_preserve_order() {
++        let mut q = AudioBuffer::new();
++        let mut expected = std::collections::VecDeque::new();
++        let mut next = 0i32;
++        let mut out = [0; BLOCK_WORDS];
++        for size in std::iter::once(192).chain((0..400).map(|i| if i % 2 == 0 { 47 } else { 49 })) {
++            for _ in 0..size {
++                q.push_packet(&packet(1, next, -next));
++                expected.push_back(next);
++                next += 1;
++            }
++            q.fill_dma(&mut out);
++            for pair in out.chunks_exact(2) {
++                let value = expected.pop_front().unwrap();
++                assert_eq!(pair, &[value as u32, (-value) as u32]);
++            }
++        }
++        assert_eq!(q.underruns, 0);
++        assert_eq!(q.overruns, 0);
++    }
++    #[test]
++    fn malformed_overflow_underflow_and_reset() {
++        let mut q = AudioBuffer::new();
++        let mut out = [0; BLOCK_WORDS];
++        q.push_packet(&[1, 2, 3]);
++        assert_eq!(q.malformed, 1);
++        assert_eq!(q.len, 0);
++        q.push_packet(&packet(CAPACITY, 1, 2));
++        q.push_packet(&packet(48, 3, 4));
++        assert_eq!(q.overruns, 1);
++        assert_eq!(q.len, 48);
++        q.push_packet(&packet(144, 3, 4));
++        for _ in 0..5 {
++            q.fill_dma(&mut out);
++        }
++        assert_eq!(q.underruns, 1);
++        assert_eq!(out, [0; BLOCK_WORDS]);
++        q.reset();
++        assert_eq!(q.feedback(), NOMINAL as u32);
++    }
++    #[test]
++    fn feedback_handles_clock_drift_and_delayed_host_response() {
++        for ppm in [-1000.0, -100.0, 0.0, 100.0, 1000.0] {
++            let mut q = AudioBuffer::new();
++            let mut out = [0; BLOCK_WORDS];
++            let mut fractions = 0.0;
++            let mut delayed = std::collections::VecDeque::from([48.0; 16]);
++            // Each iteration represents one DAC millisecond; the host clock differs.
++            for _ in 0..60_000 {
++                fractions += delayed.pop_front().unwrap() / (1.0 + ppm / 1e6);
++                let count = fractions as usize;
++                fractions -= count as f64;
++                q.push_packet(&packet(count, 100, -100));
++                q.fill_dma(&mut out);
++                delayed.push_back(q.feedback() as f64 / 16384.0);
++            }
++            assert_eq!(q.underruns, 0, "ppm={ppm}");
++            assert_eq!(q.overruns, 0, "ppm={ppm}");
++            assert!(q.len > 48 && q.len < 384, "ppm={ppm} fill={}", q.len);
++        }
++    }
++}
+diff --git a/src/i2s_lib.rs b/src/i2s_lib.rs
+index fe3cde1..6a5d9f4 100644
+--- a/src/i2s_lib.rs
++++ b/src/i2s_lib.rs
+@@ -6,11 +6,14 @@ pub const BIT_CLOCK_HZ: u32 = SAMPLE_RATE * 32 * 2; // 3.072 MHz
+ pub const PIO_CLOCK_HZ: u32 = BIT_CLOCK_HZ * 2; // 6.144 MHz
+ 
+ // 300 Hz diagnostic tone: 160 frames per period, six periods per buffer.
++#[cfg(feature = "test-tone")]
+ pub const FRAMES_PER_PERIOD: usize = 160;
++#[cfg(feature = "test-tone")]
+ pub const TABLE_SIZE: usize = FRAMES_PER_PERIOD * 6 * 2;
+ 
+ /// Identical buffers of whole periods can be replayed without discontinuities.
+ /// Compute once at startup, so sample generation cannot starve DMA.
++#[cfg(feature = "test-tone")]
+ pub fn fill_test_tone(buf: &mut [u32; TABLE_SIZE], volume_level: f32) {
+     for (frame, stereo) in buf.chunks_exact_mut(2).enumerate() {
+         let angle = (frame % FRAMES_PER_PERIOD) as f32 * 2.0 * core::f32::consts::PI
+diff --git a/src/main.rs b/src/main.rs
+index 0ea1c66..afcb39d 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -21,7 +21,11 @@ use rp235x_hal::{
+ // be linked)
+ use panic_halt as _;
+ 
++#[cfg(not(feature = "test-tone"))]
++mod audio_buffer;
+ mod i2s_lib;
++#[cfg(not(feature = "test-tone"))]
++mod usb_audio;
+ 
+ /// Tell the Boot ROM about our application
+ #[link_section = ".start_block"]
+@@ -133,8 +137,6 @@ fn main() -> ! {
+         panic!("Error initializing LCD: {}", e);
+     }
+ 
+-    let volume_level: f32 = 0.25;
+-
+     // Display configured values before audio starts. These are not measurements
+     // of the physical BCLK/LRCLK pins. Do not block the DMA loop on LCD writes.
+     let sys_freq_hz = clocks.system_clock.freq().to_Hz();
+@@ -148,7 +150,10 @@ fn main() -> ! {
+     lcd.set_cursor(0, 1).unwrap();
+     lcd.print("I2S 48000 Hz (cfg)").unwrap();
+     lcd.set_cursor(0, 2).unwrap();
+-    lcd.print("Tone 300 Hz, {volume_level * 100.0}%").unwrap();
++    #[cfg(feature = "test-tone")]
++    lcd.print("Test tone 300 Hz, 5%").unwrap();
++    #[cfg(not(feature = "test-tone"))]
++    lcd.print("USB audio S32 stereo").unwrap();
+ 
+     // PIO Globals
+     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+@@ -169,31 +174,100 @@ fn main() -> ! {
+ 
+     let dma = pac.DMA.split(&mut pac.RESETS);
+ 
+-    // Static buffers
+-    let tx_buf1 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
+-    let tx_buf2 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
+-
+-    i2s_lib::fill_test_tone(tx_buf1, volume_level);
+-    i2s_lib::fill_test_tone(tx_buf2, volume_level);
+-
+-    // Pico Audio Pack GP22 high asserts mute through its inverting transistor.
+-    let mut mute = pins.gpio22.into_push_pull_output();
+-    mute.set_low().unwrap(); // muted during setup
+-
+-    // === Double-buffered DMA setup ===
+-    // Create and queue the initial double-buffered transfer (start with tx_buf1, queue tx_buf2)
+-    let mut tx_transfer = double_buffer::Config::new((dma.ch0, dma.ch1), tx_buf1, dac_fifo_tx)
+-        .start()
+-        .read_next(tx_buf2);
+-
+-    // Start only after DMA is primed. GP22 low enables Pico Audio Pack output.
+-    let _running_sm = dac_sm.start();
+-    mute.set_high().unwrap(); // enable audio
++    // GP22 directly drives DAC XSMT and headphone amp EN: HIGH enables audio.
++    let mut audio_enable = pins.gpio22.into_push_pull_output();
++    audio_enable.set_low().unwrap();
++
++    #[cfg(feature = "test-tone")]
++    {
++        let tx_buf1 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
++        let tx_buf2 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
++        i2s_lib::fill_test_tone(tx_buf1, 0.05);
++        i2s_lib::fill_test_tone(tx_buf2, 0.05);
++        let mut transfer = double_buffer::Config::new((dma.ch0, dma.ch1), tx_buf1, dac_fifo_tx)
++            .start()
++            .read_next(tx_buf2);
++        let _running_sm = dac_sm.start();
++        audio_enable.set_high().unwrap();
++        loop {
++            let (completed, next) = transfer.wait();
++            transfer = next.read_next(completed);
++        }
++    }
+ 
+-    loop {
+-        // Requeue immediately while the other DMA buffer plays (20 ms).
+-        // Both buffers contain six complete periods; no runtime refill is needed.
+-        let (completed_buf, next_transfer) = tx_transfer.wait();
+-        tx_transfer = next_transfer.read_next(completed_buf);
++    #[cfg(not(feature = "test-tone"))]
++    {
++        use audio_buffer::{AudioBuffer, BLOCK_WORDS};
++        use usb_device::{class_prelude::UsbBusAllocator, prelude::*, UsbError};
++        let bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
++            pac.USB,
++            pac.USB_DPRAM,
++            clocks.usb_clock,
++            true,
++            &mut pac.RESETS,
++        ));
++        let mut audio = usb_audio::UsbAudio::new(&bus);
++        // pid.codes shared test VID/PID: local prototypes only, not a product ID.
++        let mut device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1209, 0x0001))
++            .strings(&[StringDescriptors::default()
++                .manufacturer("Dalton Tinoco")
++                .product("RP2350 USB Audio")
++                .serial_number("RP2350-AUDIO-001")])
++            .unwrap()
++            .max_packet_size_0(64)
++            .unwrap()
++            .max_power(100)
++            .unwrap()
++            .build();
++
++        let ring = singleton!(: AudioBuffer = AudioBuffer::new()).unwrap();
++        let tx_buf1 = singleton!(: [u32; BLOCK_WORDS] = [0; BLOCK_WORDS]).unwrap();
++        let tx_buf2 = singleton!(: [u32; BLOCK_WORDS] = [0; BLOCK_WORDS]).unwrap();
++        let mut transfer = double_buffer::Config::new((dma.ch0, dma.ch1), tx_buf1, dac_fifo_tx)
++            .start()
++            .read_next(tx_buf2);
++        let _running_sm = dac_sm.start();
++        audio_enable.set_high().unwrap(); // continuous silence until host starts
++        let mut packet = [0u8; usb_audio::MAX_PACKET];
++        let mut epoch = audio.epoch();
++        let mut was_streaming = false;
++
++        loop {
++            // USB must be polled continuously; never block waiting for DMA or LCD.
++            device.poll(&mut [&mut audio]);
++            let streaming = device.state() == UsbDeviceState::Configured && audio.streaming();
++            if audio.epoch() != epoch || streaming != was_streaming {
++                ring.reset();
++                epoch = audio.epoch();
++                was_streaming = streaming;
++            }
++            // Drain OUT packets even while idle, so stale packets cannot block reception.
++            for _ in 0..4 {
++                match audio.read(&mut packet) {
++                    Ok(n) if streaming => ring.push_packet(&packet[..n]),
++                    Ok(_) => {}
++                    Err(UsbError::WouldBlock) => break,
++                    Err(_) => {
++                        ring.reset();
++                        break;
++                    }
++                }
++            }
++            if transfer.is_done() {
++                // The other channel is running, so wait() returns immediately here.
++                let (completed, next) = transfer.wait();
++                if streaming {
++                    ring.fill_dma(completed);
++                } else {
++                    completed.fill(0);
++                }
++                transfer = next.read_next(completed);
++            }
++            if streaming {
++                // WouldBlock means the previous feedback packet is still queued.
++                // Host polls the feedback endpoint independently of audio OUT packets.
++                let _ = audio.send_feedback(ring.feedback());
++            }
++        }
+     }
+ }
+diff --git a/src/usb_audio.rs b/src/usb_audio.rs
+new file mode 100644
+index 0000000..a509653
+--- /dev/null
++++ b/src/usb_audio.rs
+@@ -0,0 +1,156 @@
++//! Minimal UAC 1.0 playback: 48 kHz, stereo S32_LE, explicit 10.14 feedback.
++//! No feature unit: volume is controlled in host software, not by USB hardware controls.
++use usb_device::{
++    class_prelude::*,
++    control::{Recipient, RequestType},
++    UsbError,
++};
++
++pub const RATE: u32 = 48_000;
++pub const MAX_PACKET: usize = 49 * 2 * 4;
++
++pub struct UsbAudio<'a, B: UsbBus> {
++    control: InterfaceNumber,
++    stream: InterfaceNumber,
++    output: EndpointOut<'a, B>,
++    feedback: EndpointIn<'a, B>,
++    alternate: u8,
++    epoch: u32,
++}
++
++impl<'a, B: UsbBus> UsbAudio<'a, B> {
++    pub fn new(bus: &'a UsbBusAllocator<B>) -> Self {
++        Self {
++            control: bus.interface(),
++            stream: bus.interface(),
++            output: bus
++                .alloc(
++                    None,
++                    EndpointType::Isochronous {
++                        synchronization: IsochronousSynchronizationType::Asynchronous,
++                        usage: IsochronousUsageType::Data,
++                    },
++                    MAX_PACKET as u16,
++                    1,
++                )
++                .unwrap(),
++            // UAC1 sync endpoint descriptor uses bmAttributes=0x01 (reserved bits zero).
++            feedback: bus
++                .alloc(
++                    None,
++                    EndpointType::Isochronous {
++                        synchronization: IsochronousSynchronizationType::NoSynchronization,
++                        usage: IsochronousUsageType::Data,
++                    },
++                    3,
++                    1,
++                )
++                .unwrap(),
++            alternate: 0,
++            epoch: 0,
++        }
++    }
++
++    pub fn streaming(&self) -> bool {
++        self.alternate == 1
++    }
++    pub fn epoch(&self) -> u32 {
++        self.epoch
++    }
++    pub fn read(&self, packet: &mut [u8]) -> Result<usize, UsbError> {
++        self.output.read(packet)
++    }
++    pub fn send_feedback(&self, value: u32) -> Result<usize, UsbError> {
++        self.feedback.write(&value.to_le_bytes()[..3])
++    }
++}
++
++impl<B: UsbBus> UsbClass<B> for UsbAudio<'_, B> {
++    fn get_configuration_descriptors(&self, w: &mut DescriptorWriter) -> usb_device::Result<()> {
++        // AudioControl interface; 30-byte class-specific AC collection.
++        w.interface(self.control, 1, 1, 0)?;
++        w.write(0x24, &[1, 0x00, 0x01, 30, 0, 1, self.stream.into()])?;
++        // USB streaming input terminal 1, stereo left/right.
++        w.write(0x24, &[2, 1, 0x01, 0x01, 0, 2, 3, 0, 0, 0])?;
++        // Speaker output terminal 2, sourced directly from terminal 1.
++        w.write(0x24, &[3, 2, 0x01, 0x03, 0, 1, 0])?;
++        // Alternate 0 has no endpoints; alternate 1 is the active stream.
++        w.interface(self.stream, 1, 2, 0)?;
++        w.interface_alt(self.stream, 1, 1, 2, 0, None)?;
++        w.write(0x24, &[1, 1, 1, 1, 0])?; // AS general, PCM format
++        w.write(0x24, &[2, 1, 2, 4, 32, 1, 0x80, 0xbb, 0])?; // 48000 Hz
++        w.endpoint_ex(&self.output, |extra| {
++            extra[0] = 0; // bRefresh: data endpoint
++            extra[1] = self.feedback.address().into(); // bSynchAddress
++            Ok(2)
++        })?;
++        // Sampling-frequency control; no pitch control, no lock delay.
++        w.write(0x25, &[1, 1, 0, 0, 0])?;
++        w.endpoint_ex(&self.feedback, |extra| {
++            extra[0] = 4; // Feedback refresh bound: 2^4 USB frames
++            extra[1] = 0;
++            Ok(2)
++        })
++    }
++
++    fn reset(&mut self) {
++        self.alternate = 0;
++        self.epoch = self.epoch.wrapping_add(1);
++    }
++    fn get_alt_setting(&mut self, interface: InterfaceNumber) -> Option<u8> {
++        if interface == self.stream {
++            Some(self.alternate)
++        } else if interface == self.control {
++            Some(0)
++        } else {
++            None
++        }
++    }
++    fn set_alt_setting(&mut self, interface: InterfaceNumber, alternative: u8) -> bool {
++        if interface == self.stream && alternative <= 1 {
++            self.alternate = alternative;
++            self.epoch = self.epoch.wrapping_add(1);
++            true
++        } else {
++            interface == self.control && alternative == 0
++        }
++    }
++    fn control_in(&mut self, xfer: ControlIn<B>) {
++        let r = xfer.request();
++        if r.request_type == RequestType::Class
++            && r.recipient == Recipient::Endpoint
++            && r.index == u8::from(self.output.address()) as u16
++        {
++            if r.value == 0x0100 && r.length == 3 {
++                let value = match r.request {
++                    0x81..=0x83 => RATE, // GET_CUR/MIN/MAX: one fixed rate
++                    0x84 => 0,           // GET_RES: no adjustable range
++                    _ => {
++                        let _ = xfer.reject();
++                        return;
++                    }
++                };
++                let _ = xfer.accept_with(&value.to_le_bytes()[..3]);
++            } else {
++                let _ = xfer.reject();
++            }
++        }
++    }
++    fn control_out(&mut self, xfer: ControlOut<B>) {
++        let r = xfer.request();
++        if r.request_type == RequestType::Class
++            && r.recipient == Recipient::Endpoint
++            && r.index == u8::from(self.output.address()) as u16
++        {
++            if r.request == 1
++                && r.value == 0x0100
++                && r.length == 3
++                && xfer.data() == &RATE.to_le_bytes()[..3]
++            {
++                let _ = xfer.accept();
++            } else {
++                let _ = xfer.reject();
++            }
++        }
++    }
++}
+diff --git a/tools/make_usb_test.py b/tools/make_usb_test.py
+new file mode 100644
+index 0000000..a936764
+--- /dev/null
++++ b/tools/make_usb_test.py
+@@ -0,0 +1,22 @@
++"""Generate a quiet 48 kHz signed-32-bit stereo WAV for USB playback testing."""
++import math
++import struct
++import sys
++import wave
++
++if len(sys.argv) != 2:
++    raise SystemExit('Usage: python3 tools/make_usb_test.py OUTPUT.wav')
++rate = 48_000
++samples = bytearray()
++for channel in range(2):
++    for i in range(2 * rate):
++        envelope = min(1.0, i / (0.05 * rate), (2 * rate - 1 - i) / (0.05 * rate))
++        value = round(0.05 * (2**31 - 1) * envelope * math.sin(2 * math.pi * 300 * i / rate))
++        pair = (value, 0) if channel == 0 else (0, value)
++        samples.extend(struct.pack('<ii', *pair))
++with wave.open(sys.argv[1], 'wb') as output:
++    output.setnchannels(2)
++    output.setsampwidth(4)
++    output.setframerate(rate)
++    output.writeframes(samples)
++print(f'Wrote {sys.argv[1]}: 48 kHz S32_LE, 5% peak, left then right.')
+diff --git a/tools/usb-tests/.gitignore b/tools/usb-tests/.gitignore
+new file mode 100644
+index 0000000..b83d222
+--- /dev/null
++++ b/tools/usb-tests/.gitignore
+@@ -0,0 +1 @@
++/target/
+diff --git a/tools/usb-tests/Cargo.lock b/tools/usb-tests/Cargo.lock
+new file mode 100644
+index 0000000..3c12d2f
+--- /dev/null
++++ b/tools/usb-tests/Cargo.lock
+@@ -0,0 +1,57 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "byteorder"
++version = "1.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
++
++[[package]]
++name = "hash32"
++version = "0.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
++dependencies = [
++ "byteorder",
++]
++
++[[package]]
++name = "heapless"
++version = "0.8.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
++dependencies = [
++ "hash32",
++ "stable_deref_trait",
++]
++
++[[package]]
++name = "portable-atomic"
++version = "1.15.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
++
++[[package]]
++name = "stable_deref_trait"
++version = "1.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
++
++[[package]]
++name = "usb-audio-host-tests"
++version = "0.1.0"
++dependencies = [
++ "usb-device",
++]
++
++[[package]]
++name = "usb-device"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
++dependencies = [
++ "heapless",
++ "portable-atomic",
++]
+diff --git a/tools/usb-tests/Cargo.toml b/tools/usb-tests/Cargo.toml
+new file mode 100644
+index 0000000..4a0269d
+--- /dev/null
++++ b/tools/usb-tests/Cargo.toml
+@@ -0,0 +1,10 @@
++[package]
++name = "usb-audio-host-tests"
++version = "0.1.0"
++edition = "2021"
++publish = false
++
++[workspace]
++
++[dependencies]
++usb-device = { version = "0.3.2", features = ["control-buffer-256"] }
+diff --git a/tools/usb-tests/src/lib.rs b/tools/usb-tests/src/lib.rs
+new file mode 100644
+index 0000000..f69d322
+--- /dev/null
++++ b/tools/usb-tests/src/lib.rs
+@@ -0,0 +1,277 @@
++#[path = "../../../src/audio_buffer.rs"]
++pub mod audio_buffer;
++#[path = "../../../src/usb_audio.rs"]
++pub mod usb_audio;
++
++#[cfg(test)]
++mod tests {
++    use super::usb_audio::*;
++    use std::{
++        collections::VecDeque,
++        sync::{Arc, Mutex},
++    };
++    use usb_device::{bus::PollResult, class_prelude::*, prelude::*, UsbDirection, UsbError};
++
++    #[derive(Default)]
++    struct Wire {
++        events: VecDeque<PollResult>,
++        reads: VecDeque<(u8, Vec<u8>)>,
++        writes: Vec<(u8, Vec<u8>)>,
++        stalled: bool,
++    }
++    struct MockBus {
++        wire: Arc<Mutex<Wire>>,
++        next_in: usize,
++        next_out: usize,
++    }
++    impl UsbBus for MockBus {
++        fn alloc_ep(
++            &mut self,
++            dir: UsbDirection,
++            addr: Option<EndpointAddress>,
++            _: EndpointType,
++            _: u16,
++            _: u8,
++        ) -> usb_device::Result<EndpointAddress> {
++            if let Some(addr) = addr {
++                return Ok(addr);
++            }
++            let next = if dir == UsbDirection::In {
++                &mut self.next_in
++            } else {
++                &mut self.next_out
++            };
++            let addr = EndpointAddress::from_parts(*next, dir);
++            *next += 1;
++            Ok(addr)
++        }
++        fn enable(&mut self) {}
++        fn reset(&self) {}
++        fn set_device_address(&self, _: u8) {}
++        fn write(&self, addr: EndpointAddress, buf: &[u8]) -> usb_device::Result<usize> {
++            let mut w = self.wire.lock().unwrap();
++            w.writes.push((addr.into(), buf.to_vec()));
++            w.events.push_back(PollResult::Data {
++                ep_out: 0,
++                ep_setup: 0,
++                ep_in_complete: 1 << addr.index(),
++            });
++            Ok(buf.len())
++        }
++        fn read(&self, addr: EndpointAddress, buf: &mut [u8]) -> usb_device::Result<usize> {
++            let mut w = self.wire.lock().unwrap();
++            let Some(i) = w.reads.iter().position(|(a, _)| *a == u8::from(addr)) else {
++                return Err(UsbError::WouldBlock);
++            };
++            let (_, bytes) = w.reads.remove(i).unwrap();
++            if bytes.len() > buf.len() {
++                return Err(UsbError::BufferOverflow);
++            }
++            buf[..bytes.len()].copy_from_slice(&bytes);
++            Ok(bytes.len())
++        }
++        fn set_stalled(&self, _: EndpointAddress, stalled: bool) {
++            self.wire.lock().unwrap().stalled = stalled;
++        }
++        fn is_stalled(&self, _: EndpointAddress) -> bool {
++            self.wire.lock().unwrap().stalled
++        }
++        fn suspend(&self) {}
++        fn resume(&self) {}
++        fn poll(&self) -> PollResult {
++            self.wire
++                .lock()
++                .unwrap()
++                .events
++                .pop_front()
++                .unwrap_or(PollResult::None)
++        }
++    }
++    fn bus() -> (UsbBusAllocator<MockBus>, Arc<Mutex<Wire>>) {
++        let wire = Arc::new(Mutex::new(Wire::default()));
++        (
++            UsbBusAllocator::new(MockBus {
++                wire: wire.clone(),
++                next_in: 1,
++                next_out: 1,
++            }),
++            wire,
++        )
++    }
++    fn transfer(
++        device: &mut UsbDevice<MockBus>,
++        audio: &mut UsbAudio<MockBus>,
++        wire: &Arc<Mutex<Wire>>,
++        setup: [u8; 8],
++        data: &[u8],
++    ) -> (Vec<u8>, bool) {
++        {
++            let mut w = wire.lock().unwrap();
++            w.writes.clear();
++            w.stalled = false;
++            w.reads.push_back((0, setup.to_vec()));
++            w.events.push_back(PollResult::Data {
++                ep_setup: 1,
++                ep_out: 0,
++                ep_in_complete: 0,
++            });
++        }
++        device.poll(&mut [audio]);
++        if setup[0] & 0x80 == 0 && !data.is_empty() {
++            let mut w = wire.lock().unwrap();
++            w.reads.push_back((0, data.to_vec()));
++            w.events.push_back(PollResult::Data {
++                ep_setup: 0,
++                ep_out: 1,
++                ep_in_complete: 0,
++            });
++        }
++        for _ in 0..32 {
++            device.poll(&mut [audio]);
++        }
++        let answer = {
++            let w = wire.lock().unwrap();
++            (
++                w.writes
++                    .iter()
++                    .filter(|(a, _)| *a == 0x80)
++                    .flat_map(|(_, b)| b.clone())
++                    .collect(),
++                w.stalled,
++            )
++        };
++        if setup[0] & 0x80 != 0 && !answer.1 {
++            {
++                let mut w = wire.lock().unwrap();
++                w.reads.push_back((0, vec![]));
++                w.events.push_back(PollResult::Data {
++                    ep_setup: 0,
++                    ep_out: 1,
++                    ep_in_complete: 0,
++                });
++            }
++            device.poll(&mut [audio]);
++        }
++        answer
++    }
++    #[test]
++    fn real_stack_emits_consistent_uac1_descriptors() {
++        let (bus, wire) = bus();
++        let mut audio = UsbAudio::new(&bus);
++        let mut device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1209, 1))
++            .max_packet_size_0(64)
++            .unwrap()
++            .build();
++        let (bytes, stalled) = transfer(
++            &mut device,
++            &mut audio,
++            &wire,
++            [0x80, 6, 0, 2, 0, 0, 255, 0],
++            &[],
++        );
++        assert!(!stalled);
++        assert_eq!(bytes.len(), 109);
++        assert_eq!(bytes[4], 2);
++        assert_eq!(
++            u16::from_le_bytes([bytes[2], bytes[3]]) as usize,
++            bytes.len()
++        );
++        let mut descriptors = Vec::new();
++        let mut remaining = bytes.as_slice();
++        while !remaining.is_empty() {
++            let n = remaining[0] as usize;
++            assert!(n >= 2);
++            descriptors.push(&remaining[..n]);
++            remaining = &remaining[n..];
++        }
++        let interfaces: Vec<_> = descriptors.iter().filter(|d| d[1] == 4).collect();
++        assert_eq!(
++            interfaces
++                .iter()
++                .map(|d| (d[2], d[3], d[4]))
++                .collect::<Vec<_>>(),
++            vec![(0, 0, 0), (1, 0, 0), (1, 1, 2)]
++        );
++        assert!(descriptors.contains(&&[11, 0x24, 2, 1, 2, 4, 32, 1, 0x80, 0xbb, 0][..]));
++        let endpoints: Vec<_> = descriptors.iter().filter(|d| d[1] == 5).collect();
++        assert_eq!(*endpoints[0], &[9, 5, 1, 5, 0x88, 1, 1, 0, 0x81]); // 392 bytes, async, sync=81
++        assert_eq!(*endpoints[1], &[9, 5, 0x81, 1, 3, 0, 1, 4, 0]);
++    }
++    #[test]
++    fn rate_controls_alt_settings_and_reset() {
++        let (bus, wire) = bus();
++        let mut audio = UsbAudio::new(&bus);
++        let mut device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1209, 1))
++            .max_packet_size_0(64)
++            .unwrap()
++            .build();
++        let (data, stall) = transfer(
++            &mut device,
++            &mut audio,
++            &wire,
++            [0xa2, 0x81, 0, 1, 1, 0, 3, 0],
++            &[],
++        );
++        assert!(!stall);
++        assert_eq!(data, [0x80, 0xbb, 0]);
++        assert!(
++            !transfer(
++                &mut device,
++                &mut audio,
++                &wire,
++                [0x22, 1, 0, 1, 1, 0, 3, 0],
++                &[0x80, 0xbb, 0]
++            )
++            .1
++        );
++        assert!(
++            transfer(
++                &mut device,
++                &mut audio,
++                &wire,
++                [0x22, 1, 0, 1, 1, 0, 3, 0],
++                &[0x44, 0xac, 0]
++            )
++            .1
++        );
++        assert!(!audio.streaming());
++        assert!(
++            !transfer(
++                &mut device,
++                &mut audio,
++                &wire,
++                [1, 11, 1, 0, 1, 0, 0, 0],
++                &[]
++            )
++            .1
++        );
++        assert!(audio.streaming());
++        let epoch = audio.epoch();
++        assert!(
++            transfer(
++                &mut device,
++                &mut audio,
++                &wire,
++                [1, 11, 2, 0, 1, 0, 0, 0],
++                &[]
++            )
++            .1
++        );
++        assert!(audio.streaming());
++        wire.lock().unwrap().events.push_back(PollResult::Reset);
++        device.poll(&mut [&mut audio]);
++        assert!(!audio.streaming());
++        assert_ne!(epoch, audio.epoch());
++    }
++    #[test]
++    fn feedback_is_three_byte_10_14() {
++        let (bus, wire) = bus();
++        let audio = UsbAudio::new(&bus);
++        let _device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1209, 1)).build();
++        assert_eq!(audio.send_feedback(48 << 14).unwrap(), 3);
++        assert_eq!(
++            wire.lock().unwrap().writes.last().unwrap(),
++            &(0x81, vec![0, 0, 12])
++        );
++    }
++}

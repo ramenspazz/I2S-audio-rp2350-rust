@@ -5,6 +5,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+test-tone = []
+
 [dependencies]
 cortex-m = "0.7.2"
 cortex-m-rt = "0.7"
@@ -28,7 +32,7 @@ nb = "1.0"
 panic-halt = "0.2.0"
 pio = "0.3.0"
 rp235x-hal = {version = "0.4.0", features = ["binary-info", "critical-section-impl", "rt", "defmt"]}
-usb-device = "0.3.2"
+usb-device = { version = "0.3.2", features = ["control-buffer-256"] }
 usbd-serial = "0.2.2"
 static_cell = "2.1.0"
 libm = "0.2.16"

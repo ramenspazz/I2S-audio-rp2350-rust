@@ -1,5 +1,8 @@
 # Pico Audio Pack timing test
 
+The default firmware now plays USB audio. Use `--features test-tone` for this
+standalone tone test; see `USB_AUDIO.md` for USB playback.
+
 This change is based on upstream commit 62cfaa6. It replaces the earlier patch
 against i2s_module.rs. Apply it to the latest unmodified main branch.
 
@@ -9,7 +12,7 @@ Install Rust and the ARM target, then build from the repository directory:
 
 ```sh
 rustup target add thumbv8m.main-none-eabihf
-cargo build --release --locked
+cargo build --release --locked --features test-tone
 python3 tools/check_i2s.py
 ```
 
@@ -31,7 +34,7 @@ Pico Audio Pack connections are unchanged:
 | DIN | 9 | Signed stereo PCM, matching channels |
 | BCLK | 10 | 3.072 MHz average |
 | LRCLK | 11 | 48 kHz, 64 BCLK periods/frame |
-| MUTE | 22 | Low during playback |
+| MUTE (active low) | 22 | High during playback |
 
 Both analog channels should produce a continuous 300 Hz sine wave. If you have
 a scope or logic analyzer, measure BCLK and LRCLK first. The fractional divider
@@ -58,7 +61,7 @@ are exactly 3000 system cycles with these settings.
 
 ## Validation and limits
 
-`cargo build --release --locked` succeeds for thumbv8m.main-none-eabihf.
+`cargo build --release --locked --features test-tone` succeeds for thumbv8m.main-none-eabihf.
 The Python PIO model checks serial bits, clock cadence, and channel alignment
 under continuous FIFO supply. It does not model DMA starvation or analog output.
 This firmware has not been flashed or measured on physical hardware here.

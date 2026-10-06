@@ -21,7 +21,11 @@ use rp235x_hal::{
 // be linked)
 use panic_halt as _;
 
+#[cfg(not(feature = "test-tone"))]
+mod audio_buffer;
 mod i2s_lib;
+#[cfg(not(feature = "test-tone"))]
+mod usb_audio;
 
 /// Tell the Boot ROM about our application
 #[link_section = ".start_block"]
@@ -133,8 +137,6 @@ fn main() -> ! {
         panic!("Error initializing LCD: {}", e);
     }
 
-    let volume_level: f32 = 0.25;
-
     // Display configured values before audio starts. These are not measurements
     // of the physical BCLK/LRCLK pins. Do not block the DMA loop on LCD writes.
     let sys_freq_hz = clocks.system_clock.freq().to_Hz();
@@ -148,7 +150,10 @@ fn main() -> ! {
     lcd.set_cursor(0, 1).unwrap();
     lcd.print("I2S 48000 Hz (cfg)").unwrap();
     lcd.set_cursor(0, 2).unwrap();
-    lcd.print("Tone 300 Hz, {volume_level * 100.0}%").unwrap();
+    #[cfg(feature = "test-tone")]
+    lcd.print("Test tone 300 Hz, 5%").unwrap();
+    #[cfg(not(feature = "test-tone"))]
+    lcd.print("USB audio S32 stereo").unwrap();
 
     // PIO Globals
     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
@@ -169,31 +174,100 @@ fn main() -> ! {
 
     let dma = pac.DMA.split(&mut pac.RESETS);
 
-    // Static buffers
-    let tx_buf1 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
-    let tx_buf2 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
+    // GP22 directly drives DAC XSMT and headphone amp EN: HIGH enables audio.
+    let mut audio_enable = pins.gpio22.into_push_pull_output();
+    audio_enable.set_low().unwrap();
 
-    i2s_lib::fill_test_tone(tx_buf1, volume_level);
-    i2s_lib::fill_test_tone(tx_buf2, volume_level);
+    #[cfg(feature = "test-tone")]
+    {
+        let tx_buf1 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
+        let tx_buf2 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
+        i2s_lib::fill_test_tone(tx_buf1, 0.05);
+        i2s_lib::fill_test_tone(tx_buf2, 0.05);
+        let mut transfer = double_buffer::Config::new((dma.ch0, dma.ch1), tx_buf1, dac_fifo_tx)
+            .start()
+            .read_next(tx_buf2);
+        let _running_sm = dac_sm.start();
+        audio_enable.set_high().unwrap();
+        loop {
+            let (completed, next) = transfer.wait();
+            transfer = next.read_next(completed);
+        }
+    }
 
-    // Pico Audio Pack GP22 high asserts mute through its inverting transistor.
-    let mut mute = pins.gpio22.into_push_pull_output();
-    mute.set_low().unwrap(); // muted during setup
+    #[cfg(not(feature = "test-tone"))]
+    {
+        use audio_buffer::{AudioBuffer, BLOCK_WORDS};
+        use usb_device::{class_prelude::UsbBusAllocator, prelude::*, UsbError};
+        let bus = UsbBusAllocator::new(hal::usb::UsbBus::new(
+            pac.USB,
+            pac.USB_DPRAM,
+            clocks.usb_clock,
+            true,
+            &mut pac.RESETS,
+        ));
+        let mut audio = usb_audio::UsbAudio::new(&bus);
+        // pid.codes shared test VID/PID: local prototypes only, not a product ID.
+        let mut device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1209, 0x0001))
+            .strings(&[StringDescriptors::default()
+                .manufacturer("Dalton Tinoco")
+                .product("RP2350 USB Audio")
+                .serial_number("RP2350-AUDIO-001")])
+            .unwrap()
+            .max_packet_size_0(64)
+            .unwrap()
+            .max_power(100)
+            .unwrap()
+            .build();
 
-    // === Double-buffered DMA setup ===
-    // Create and queue the initial double-buffered transfer (start with tx_buf1, queue tx_buf2)
-    let mut tx_transfer = double_buffer::Config::new((dma.ch0, dma.ch1), tx_buf1, dac_fifo_tx)
-        .start()
-        .read_next(tx_buf2);
+        let ring = singleton!(: AudioBuffer = AudioBuffer::new()).unwrap();
+        let tx_buf1 = singleton!(: [u32; BLOCK_WORDS] = [0; BLOCK_WORDS]).unwrap();
+        let tx_buf2 = singleton!(: [u32; BLOCK_WORDS] = [0; BLOCK_WORDS]).unwrap();
+        let mut transfer = double_buffer::Config::new((dma.ch0, dma.ch1), tx_buf1, dac_fifo_tx)
+            .start()
+            .read_next(tx_buf2);
+        let _running_sm = dac_sm.start();
+        audio_enable.set_high().unwrap(); // continuous silence until host starts
+        let mut packet = [0u8; usb_audio::MAX_PACKET];
+        let mut epoch = audio.epoch();
+        let mut was_streaming = false;
 
-    // Start only after DMA is primed. GP22 low enables Pico Audio Pack output.
-    let _running_sm = dac_sm.start();
-    mute.set_high().unwrap(); // enable audio
-
-    loop {
-        // Requeue immediately while the other DMA buffer plays (20 ms).
-        // Both buffers contain six complete periods; no runtime refill is needed.
-        let (completed_buf, next_transfer) = tx_transfer.wait();
-        tx_transfer = next_transfer.read_next(completed_buf);
+        loop {
+            // USB must be polled continuously; never block waiting for DMA or LCD.
+            device.poll(&mut [&mut audio]);
+            let streaming = device.state() == UsbDeviceState::Configured && audio.streaming();
+            if audio.epoch() != epoch || streaming != was_streaming {
+                ring.reset();
+                epoch = audio.epoch();
+                was_streaming = streaming;
+            }
+            // Drain OUT packets even while idle, so stale packets cannot block reception.
+            for _ in 0..4 {
+                match audio.read(&mut packet) {
+                    Ok(n) if streaming => ring.push_packet(&packet[..n]),
+                    Ok(_) => {}
+                    Err(UsbError::WouldBlock) => break,
+                    Err(_) => {
+                        ring.reset();
+                        break;
+                    }
+                }
+            }
+            if transfer.is_done() {
+                // The other channel is running, so wait() returns immediately here.
+                let (completed, next) = transfer.wait();
+                if streaming {
+                    ring.fill_dma(completed);
+                } else {
+                    completed.fill(0);
+                }
+                transfer = next.read_next(completed);
+            }
+            if streaming {
+                // WouldBlock means the previous feedback packet is still queued.
+                // Host polls the feedback endpoint independently of audio OUT packets.
+                let _ = audio.send_feedback(ring.feedback());
+            }
+        }
     }
 }

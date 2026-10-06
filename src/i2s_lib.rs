@@ -6,11 +6,14 @@ pub const BIT_CLOCK_HZ: u32 = SAMPLE_RATE * 32 * 2; // 3.072 MHz
 pub const PIO_CLOCK_HZ: u32 = BIT_CLOCK_HZ * 2; // 6.144 MHz
 
 // 300 Hz diagnostic tone: 160 frames per period, six periods per buffer.
+#[cfg(feature = "test-tone")]
 pub const FRAMES_PER_PERIOD: usize = 160;
+#[cfg(feature = "test-tone")]
 pub const TABLE_SIZE: usize = FRAMES_PER_PERIOD * 6 * 2;
 
 /// Identical buffers of whole periods can be replayed without discontinuities.
 /// Compute once at startup, so sample generation cannot starve DMA.
+#[cfg(feature = "test-tone")]
 pub fn fill_test_tone(buf: &mut [u32; TABLE_SIZE], volume_level: f32) {
     for (frame, stereo) in buf.chunks_exact_mut(2).enumerate() {
         let angle = (frame % FRAMES_PER_PERIOD) as f32 * 2.0 * core::f32::consts::PI
