@@ -11,12 +11,12 @@ pub const TABLE_SIZE: usize = FRAMES_PER_PERIOD * 6 * 2;
 
 /// Identical buffers of whole periods can be replayed without discontinuities.
 /// Compute once at startup, so sample generation cannot starve DMA.
-pub fn fill_test_tone(buf: &mut [u32; TABLE_SIZE]) {
+pub fn fill_test_tone(buf: &mut [u32; TABLE_SIZE], volume_level: f32) {
     for (frame, stereo) in buf.chunks_exact_mut(2).enumerate() {
         let angle = (frame % FRAMES_PER_PERIOD) as f32 * 2.0 * core::f32::consts::PI
             / FRAMES_PER_PERIOD as f32;
         // Signed 24-bit PCM at 5% amplitude, left-aligned in a 32-bit slot.
-        let sample = (libm::sinf(angle) * (0x7fffff as f32 * 0.05)) as i32;
+        let sample = (libm::sinf(angle) * (0x7fffff as f32 * volume_level / 100.0)) as i32;
         let word = (sample as u32) << 8;
         stereo[0] = word;
         stereo[1] = word;

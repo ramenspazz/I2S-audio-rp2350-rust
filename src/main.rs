@@ -6,6 +6,7 @@ use embedded_hal::digital::OutputPin;
 use fugit::RateExtU32;
 use heapless::String;
 use i2c_character_display::{CharacterDisplayPCF8574T, LcdDisplayType};
+// LCD is connected to vBUS-red, ground-brown, gpio27-yellow, gpio28-orange
 use rp235x_hal::{
     self as hal,
     clocks::{self, Clock},
@@ -132,6 +133,8 @@ fn main() -> ! {
         panic!("Error initializing LCD: {}", e);
     }
 
+    let volume_level: f32 = 0.25;
+
     // Display configured values before audio starts. These are not measurements
     // of the physical BCLK/LRCLK pins. Do not block the DMA loop on LCD writes.
     let sys_freq_hz = clocks.system_clock.freq().to_Hz();
@@ -145,7 +148,7 @@ fn main() -> ! {
     lcd.set_cursor(0, 1).unwrap();
     lcd.print("I2S 48000 Hz (cfg)").unwrap();
     lcd.set_cursor(0, 2).unwrap();
-    lcd.print("Tone 300 Hz, 5%").unwrap();
+    lcd.print("Tone 300 Hz, {volume_level * 100.0}%").unwrap();
 
     // PIO Globals
     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
@@ -170,12 +173,12 @@ fn main() -> ! {
     let tx_buf1 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
     let tx_buf2 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
 
-    i2s_lib::fill_test_tone(tx_buf1);
-    i2s_lib::fill_test_tone(tx_buf2);
+    i2s_lib::fill_test_tone(tx_buf1, volume_level);
+    i2s_lib::fill_test_tone(tx_buf2, volume_level);
 
     // Pico Audio Pack GP22 high asserts mute through its inverting transistor.
     let mut mute = pins.gpio22.into_push_pull_output();
-    mute.set_high().unwrap();
+    mute.set_low().unwrap(); // muted during setup
 
     // === Double-buffered DMA setup ===
     // Create and queue the initial double-buffered transfer (start with tx_buf1, queue tx_buf2)
@@ -185,7 +188,7 @@ fn main() -> ! {
 
     // Start only after DMA is primed. GP22 low enables Pico Audio Pack output.
     let _running_sm = dac_sm.start();
-    mute.set_low().unwrap();
+    mute.set_high().unwrap(); // enable audio
 
     loop {
         // Requeue immediately while the other DMA buffer plays (20 ms).
