@@ -14,5 +14,8 @@ If you want to build for the rp2040, this is possible in my testing, but overclo
 125MHZ core speed not being sufficient to pass enough data at 32bits-48kHz. Overclock at your own risk!
 
 # Running
-The easiest way to run this is to use [picotool](https://github.com/raspberrypi/picotool#building--installing) as a runner, so that uploading the UF2 file to the pico is automated. I build the project using `cargo run --release --locked` after making sure that the target listed in .cargo/config.toml is correct for your device. For the
-rp2350, the correct target is `thumbv8m.main-none-eabihf`.
+The easiest way to get this project running on hardware is to first clone the repository with `git clone https://github.com/ramenspazz/I2S-audio-rp2350-rust/`
+and then use [picotool](https://github.com/raspberrypi/picotool#building--installing) as a runner, so that uploading the UF2 file to the pico is automated. Next, make sure that the target listed in .cargo/config.toml is correct for your device.  For the rp2350, the correct target is `thumbv8m.main-none-eabihf`. 
+I build, upload and run the project on my pimoroni pico lipo 2xl w using `cargo run --release --locked`.
+
+Cheers!
