@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # RP2350 USB audio playback prototype
 
 Default firmware: UAC 1.0, stereo 48 kHz S32_LE USB playback through Pico Audio Pack.
