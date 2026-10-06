@@ -1,20 +1,40 @@
 #![no_std]
 #![no_main]
-mod i2s_module;
-use cortex_m_rt::entry;
+
+#![allow(unused_imports)]
+use cortex_m_rt::entry; use heapless::String;
+// used, but compiler will complain if unused_inports are not allowed
 use rp235x_hal::{
     self as hal,
+    clocks,
+    // clocks::ClockSource,
     dma::{double_buffer, single_buffer, DMAExt},
+    gpio::{FunctionI2C, Pin},
+    pac,
     pio::{PIOExt},
     singleton,
+    Sio,
+    // usb::UsbBus,
 };
+use rp235x_hal::clocks::ClockSource;
+use core::fmt::Write;
 use embedded_hal::digital::OutputPin;
+use embedded_hal::i2c::I2c;
+use embedded_hal::delay::DelayNs;
 use fugit::{self, RateExtU32};
-use hal::{clocks, pac};
+
+// https://crates.io/crates/i2c-character-display
+use i2c_character_display::{AdafruitLCDBackpack, CharacterDisplayPCF8574T, LcdDisplayType};
+
+// usb stuff
+// use usb_device::{class_prelude::UsbBusAllocator, prelude::*};
+// use usbd_serial::SerialPort;
 
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
 use panic_halt as _;
+
+mod i2s_lib;
 
 /// Tell the Boot ROM about our application
 #[link_section = ".start_block"]
@@ -22,20 +42,19 @@ use panic_halt as _;
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
 const XTAL_FREQ_HZ: u32 = 12_000_000u32; // 12.0 Mhz
-const SYS_CLOCK_HZ: u32 = 153_600_000u32; // 153.6 MHz
 
 // This is output for the system clock pll settings
-// $ ./vcocalc.py 153.6
-// Requested: 153.6 MHz
-// Achieved:  153.6 MHz
+// $ ./vcocalc.py 193.608
+// Requested: 193.608 MHz
+// Achieved:  193.5 MHz
 // REFDIV:    1
-// FBDIV:     128 (VCO = 1536.0 MHz)
-// PD1:       5
+// FBDIV:     129 (VCO = 1548.0 MHz)
+// PD1:       4
 // PD2:       2
 const REFDIV: u8 = 1;
-const POST_DIVIDER_1: u8 = 5;
+const POST_DIVIDER_1: u8 = 4;
 const POST_DIVIDER_2: u8 = 2;
-const VCO_FREQ: u32 = 1536;
+const VCO_FREQ: u32 = 1548; 
 
 // This is output for the usb clock pll settings
 // $ ./vcocalc.py 48
@@ -50,44 +69,67 @@ const USB_POST_DIVIDER_1: u8 = 6;
 const USB_POST_DIVIDER_2: u8 = 5;
 const USB_VCO_FREQ: u32 = 1440;
 
-// other constants
-const TABLE_SIZE: usize = 256;
-const SIZE_U16: usize = 65536;
-const AMPLITUDE: i32 = 0x6FFFFF;
-const FREQUENCY: f32 = 300.0;
-const SAMPLE_RATE: f32 = 48_000.0;
-const PI: f32 = 3.141592653589732385;
-
-/// The minimum and maximum PWM value (i.e. LED brightness) we want
-const LOW: u16 = 0x0000;
-const HIGH: u16 = 0xFFF0;
-
-/// # Purpose
-/// Generates an array of u32 samples that represent an i32 value at the byte level
-fn generate_sine_wave_single_sample_angular(theta_u16: u16) -> u32 {
-    let angle = theta_u16 as f32 * 2.0 * PI * FREQUENCY / SIZE_U16 as f32;
-    pack_i2s_sample(
-        AMPLITUDE as f32 * {
-            // using a taylor series to calculate the sine wave value for the given angle
-            let mut out_temp = 0.;
-            let mut angle_temp = 0.;
-            out_temp += angle;
-            angle_temp = angle_temp * angle * angle;
-            out_temp += angle_temp / 6.;
-            out_temp += angle_temp * angle * angle / 120.;
-            out_temp
-        }
-    )
+fn output_u32_num_as_string(number: &u32) -> String<16> {
+    // Create an empty and growable `String`
+    let mut string = String::new();
+    // collect numbers from the string first.
+    // The first step is to determine how many digits the number consists of.
+    let mut digit_count = 0;
+    let mut temp_number = *number;
+    while temp_number > 0 {
+        temp_number /= 10;
+        digit_count += 1;
+    }
+    // Now we can extract each digit and convert it to a char, starting from the most significant digit.
+    for i in (0..digit_count).rev() {
+        let divisor = 10u32.pow(i);
+        let digit = (number / divisor) % 10;
+        string.push((digit as u8 + b'0') as char);
+    }
+    // return string
+    string
 }
 
-fn pack_i2s_sample(sample: f32) -> u32 {
-    let clamped = sample.max(-1.0).min(1.0);
-    (clamped * 2147483647.0) as u32  // Convert to i32, reinterpret as u32
+fn fill_buffer(buf: &mut [u32], phase: &mut u16) {
+    for i in 0..(buf.len() / 2) {
+        let sample = i2s_lib::generate_sine_wave_single_sample_angular(
+            (i as u16).wrapping_add(*phase)
+        );
+        let idx = i * 2;
+        buf[idx]     = sample;  // Left channel
+        buf[idx + 1] = sample;  // Right channel (mono test)
+    }
+    *phase = phase.wrapping_add(1);
 }
 
-#[entry]
+#[rp235x_hal::entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
+
+    // SAFETY: We are the only ones accessing the power management registers, and we are following the procedure
+    //outlined in the datasheet, so this should be safe.
+    unsafe {
+        let powman = &*rp235x_pac::POWMAN::ptr();
+
+        // 1. Unlock the VREG control
+        // This is usually done by writing password + unlock bit (often bit 13 or bit 12)
+        powman.vreg_ctrl().write(|w| {
+            w.bits(
+                (0x5AFEu32 << 16) | (1u32 << 13)   // password + unlock bit
+                // You may need to OR in other bits (e.g. temperature threshold) — check datasheet
+            )
+        });
+
+        // 2. Set the voltage to 01100 binary (1.15 V)
+        // Assuming the voltage select field is in bits 8:4 (very common on RP series)
+        powman.vreg().write(|w| {
+            w.bits(
+                (0x5AFEu32 << 16)               // password
+                | (0b01100u32 << 4)             // voltage encoding 01100 → 1.15 V
+                // | other bits if needed (e.g. enable bits)
+            )
+        });
+    }
 
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
     let mut clocks = clocks::ClocksManager::new(pac.CLOCKS);
@@ -98,7 +140,7 @@ fn main() -> ! {
         .map_err(clocks::InitError::XoscErr)
         .unwrap();
 
-    pub const PLL_SYS_153P6MHZ: hal::pll::PLLConfig = hal::pll::PLLConfig {
+    pub const PLL_SYS_193P5MHZ: hal::pll::PLLConfig = hal::pll::PLLConfig {
         vco_freq: fugit::HertzU32::MHz(VCO_FREQ),
         refdiv: REFDIV,
         post_div1: POST_DIVIDER_1,
@@ -115,7 +157,7 @@ fn main() -> ! {
     let pll_sys = hal::pll::setup_pll_blocking(
         pac.PLL_SYS,
         xosc.operating_frequency().into(),
-        PLL_SYS_153P6MHZ,
+        PLL_SYS_193P5MHZ,
         &mut clocks,
         &mut pac.RESETS,
     )
@@ -130,7 +172,7 @@ fn main() -> ! {
     )
     .unwrap();
 
-    // initialize the system clock to 153.6 MHz and the usb clock to 48 MHz
+    // initialize the system clock to 196.608 MHz and the usb clock to 48 MHz
     clocks.init_default(&xosc, &pll_sys, &pll_usb).unwrap();
 
     let sio = rp235x_hal::Sio::new(pac.SIO);
@@ -142,12 +184,55 @@ fn main() -> ! {
         &mut pac.RESETS
     );
 
+    // set up and configure the HD44780 based LCD display over i2c
+    // Configure two pins as being I²C, not GPIO
+    let sda_pin: Pin<_, FunctionI2C, _> = pins.gpio26.reconfigure();
+    let scl_pin: Pin<_, FunctionI2C, _> = pins.gpio27.reconfigure();
+
+    // Create the I²C drive, using the two pre-configured pins. This will fail
+    // at compile time if the pins are in the wrong mode, or if this I²C
+    // peripheral isn't available on these pins!
+    let mut i2c = hal::I2C::i2c1(
+        pac.I2C1,
+        sda_pin,
+        scl_pin, // Try `not_an_scl_pin` here
+        400.kHz(),
+        &mut pac.RESETS,
+        &clocks.system_clock,
+    );
+
+    let mut delay = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);    // init LCD1602
+
+    // PCF8574T adapter for a single HD44780 controller using a 20x4 character LCD.
+    let mut lcd = CharacterDisplayPCF8574T::new(i2c, LcdDisplayType::Lcd20x4, delay);
+    if let Err(e) = lcd.init() {
+        panic!("Error initializing LCD: {}", e);
+    }
+
+    // set up the display
+    lcd.backlight(true);
+    lcd.clear();
+    lcd.home();
+    lcd.print("I2S AUDIO OUTPUT");
+    lcd.blink_cursor(true);
+    delay.delay_ms(500u32); // wait for 0.5 seconds
+
+
+    // Get the actual system clock frequency (this reflects your overclock)
+    let sys_freq_hz = clocks.system_clock.get_freq().to_Hz();
+    let mut output_string = output_u32_num_as_string(&sys_freq_hz);
+    lcd.clear();
+    // append unit to the numeric string
+    lcd.print("SYS CLOCK in Hz");
+    lcd.set_cursor(0, 1);
+    lcd.print(&output_string);
+
     // PIO Globals
     let (mut pio0, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
 
-    let exact_divider = i2s_module::PioClockDivider::Exact { integer: 25, fraction: 0 };
+    let exact_divider = i2s_lib::PioClockDivider::Exact { integer: 1, fraction: 0 };
 
-    let dac_output = i2s_module::I2SOutput::new(
+    let dac_output = i2s_lib::I2SOutput::new(
         &mut pio0,
         exact_divider,
         sm0,
@@ -156,66 +241,43 @@ fn main() -> ! {
         pins.gpio11
     ).unwrap();
     
-    // set up the dma for the i2s output
     let (dac_sm, _, dac_fifo_tx) = dac_output.split();
     
-    let mut mute = pins.gpio22.into_push_pull_output();
-    mute.set_low(); // unmute
-    
-    dac_sm.start();
     let dma = pac.DMA.split(&mut pac.RESETS);
 
-    let message1: [u32; TABLE_SIZE] = [Default::default(); TABLE_SIZE];
-    let message2: [u32; TABLE_SIZE] = [Default::default(); TABLE_SIZE];
+    // Static buffers
+    let tx_buf1 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
+    let tx_buf2 = singleton!(: [u32; i2s_lib::TABLE_SIZE] = [0; i2s_lib::TABLE_SIZE]).unwrap();
 
-    // Transfer two single messages via DMA.
-    let tx_buf1 = singleton!(: [u32; TABLE_SIZE] = message1).unwrap();
-    let tx_buf2 = singleton!(: [u32; TABLE_SIZE] = message2).unwrap();
+    let mut phase: u16 = 0;
 
-    for i in 0..TABLE_SIZE {
-        let cur_sample = generate_sine_wave_single_sample_angular(i as u16);
-        tx_buf1[i] = cur_sample; // somehow, this needs to be added to the buffer twice for each audio channel
-    }
+    // Fill both buffers with stereo data (left + right)
+    fill_buffer(tx_buf1, &mut phase);
+    fill_buffer(tx_buf2, &mut phase);
 
-    for i in 0..TABLE_SIZE {
-        let cur_sample = generate_sine_wave_single_sample_angular(i as u16);
-        tx_buf2[i] = cur_sample; // somehow, this needs to be added to the buffer twice for each audio channel
-    }
-    
-    let tx_transfer1 = single_buffer::Config::new(dma.ch0, tx_buf1, dac_fifo_tx).start();
-    let (ch0, tx_buf1, dac_fifo_tx) = tx_transfer1.wait();
-    let tx_transfer2 = single_buffer::Config::new(dma.ch1, tx_buf2, dac_fifo_tx).start();
-    let (ch1, tx_buf2, dac_fifo_tx) = tx_transfer2.wait();
-    // Chain some buffers together for continuous transfers
-    let mut tx_transfer = double_buffer::Config::new((ch0, ch1), tx_buf1, dac_fifo_tx)
-    .start()
-    .read_next(tx_buf2);
-    let mut next_buf = singleton!(: [u32; TABLE_SIZE] = message1).unwrap();
-    // generate initial samples for the first two transfers, so we can start the DMAs before entering the loop
+    // === Double-buffered DMA setup ===
+    // Create and queue the initial double-buffered transfer (start with tx_buf1, queue tx_buf2)
+    let mut tx_transfer = double_buffer::Config::new(
+        (dma.ch0, dma.ch1),
+        tx_buf1,
+        dac_fifo_tx,
+    ).start().read_next(tx_buf2);
 
-    for i in 0..TABLE_SIZE {
-        let cur_sample = generate_sine_wave_single_sample_angular(i as u16);
-        next_buf[i] = cur_sample; // somehow, this needs to be added to the buffer twice for each audio channel
-    }
-    
-    let mut gen_u16: u16 = 0;
+    // === Start audio ===
+    let mut mute = pins.gpio22.into_push_pull_output();
+    mute.set_low();   // unmute DAC
+    dac_sm.start();
+
+    // Main loop
     loop {
         if tx_transfer.is_done() {
-            // Here we generate new sine samples while the last DMA (triggered by read_next below)
-            // is still doing its thing. This loop should cause gen_u16 to overflow, and this is intentional.
-            // the wrap around is what creates the periodicity of the sine wave sample.
-            for i in 0..TABLE_SIZE {
-                let cur_sample = generate_sine_wave_single_sample_angular(i as u16 + gen_u16);
-                next_buf[i] = cur_sample; // somehow, this needs to be added to the buffer twice for each audio channel
-            }
-            gen_u16 += 1;
-            // wait is a blocking call, returns when tx_transfer is complete
-            let (tx_buf, next_tx_transfer) = tx_transfer.wait();
-            // read_next is IMO confusing named - but from our point of view it's toggling
-            // what DMA channel is used and specifying next_buf for the new transfer,
-            // finally it begins the new DMA channel that uses next_buf.
-            tx_transfer = next_tx_transfer.read_next(next_buf);
-            next_buf = tx_buf;
+            let (completed_buf, next_transfer) = tx_transfer.wait();
+
+            // Refill the buffer that just finished
+            fill_buffer(completed_buf, &mut phase);
+
+            // Hand it back as the next buffer
+            tx_transfer = next_transfer.read_next(completed_buf);
         }
     }
 }
