@@ -210,7 +210,7 @@ fn main() -> ! {
         // pid.codes shared test VID/PID: local prototypes only, not a product ID.
         let mut device = UsbDeviceBuilder::new(&bus, UsbVidPid(0x1209, 0x0001))
             .strings(&[StringDescriptors::default()
-                .manufacturer("Dalton Tinoco")
+                .manufacturer("ramenspazz")
                 .product("RP2350 USB Audio")
                 .serial_number("RP2350-AUDIO-001")])
             .unwrap()
