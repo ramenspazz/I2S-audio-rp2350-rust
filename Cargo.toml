@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "rp-2350-i2s-output"
 version = "0.0.19128" # why "0.0.19128"? There is no meaning :3
